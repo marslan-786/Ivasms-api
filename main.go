@@ -15,13 +15,11 @@ import (
 	"time"
 )
 
-// صاف نمبرز کے نتائج کے لیے اسٹرکچر
 type CleanNumber struct {
 	Network string `json:"network"`
 	Number  string `json:"number"`
 }
 
-// ivaSMS سے آنے والے کچے ڈیٹا کا اسٹرکچر
 type IvaNumbersResponse struct {
 	Data []struct {
 		Number json.Number `json:"Number"`
@@ -37,9 +35,6 @@ func main() {
 	http.ListenAndServe(":8080", nil)
 }
 
-// ------------------------------------------------------------------
-// 1. ایس ایم ایس حاصل کرنے والا فنکشن (/api/sms)
-// ------------------------------------------------------------------
 func handleSMS(w http.ResponseWriter, r *http.Request) {
 	ranges, rawBody, statusCode, err := fetchRanges()
 	
@@ -48,7 +43,6 @@ func handleSMS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// اگر کوئی رینج نہیں ملی یا سرور نے ایرر دیا ہے، تو ہوبہو را ڈیٹا (Raw Data) دکھا دیں
 	if statusCode != 200 || len(ranges) == 0 {
 		w.WriteHeader(statusCode)
 		w.Write(rawBody)
@@ -58,7 +52,6 @@ func handleSMS(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	
-	// اس کو make سے انیشلائز کیا ہے تاکہ خالی ہونے کی صورت میں null کی بجائے [] ریٹرن ہو
 	allSMS := make([][]string, 0)
 
 	for _, rng := range ranges {
@@ -85,20 +78,14 @@ func handleSMS(w http.ResponseWriter, r *http.Request) {
 
 	wg.Wait()
 
-	// وقت کے حساب سے سورٹنگ (نئے میسج سب سے اوپر)
-	// انڈیکس 3 پر ہمارا وقت (Time) محفوظ ہے
 	sort.Slice(allSMS, func(i, j int) bool {
 		return allSMS[i][3] > allSMS[j][3]
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	// آپ کی ڈیمانڈ کے مطابق بالکل Array of Arrays والا فارمیٹ
 	json.NewEncoder(w).Encode(allSMS)
 }
 
-// ------------------------------------------------------------------
-// 2. صاف نمبرز حاصل کرنے والا فنکشن (/api/numbers)
-// ------------------------------------------------------------------
 func handleNumbers(w http.ResponseWriter, r *http.Request) {
 	currentTimestamp := time.Now().UnixMilli()
 	apiURL := fmt.Sprintf("https://www.ivasms.com/portal/numbers?draw=1&columns%%5B0%%5D%%5Bdata%%5D=number_id&columns%%5B0%%5D%%5Bname%%5D=id&columns%%5B0%%5D%%5Borderable%%5D=false&columns%%5B1%%5D%%5Bdata%%5D=Number&columns%%5B2%%5D%%5Bdata%%5D=range&columns%%5B3%%5D%%5Bdata%%5D=A2P&columns%%5B4%%5D%%5Bdata%%5D=LimitA2P&columns%%5B5%%5D%%5Bdata%%5D=limit_cli_a2p&columns%%5B6%%5D%%5Bdata%%5D=limit_cli_did_a2p&columns%%5B7%%5D%%5Bdata%%5D=action&columns%%5B7%%5D%%5Bsearchable%%5D=false&columns%%5B7%%5D%%5Borderable%%5D=false&order%%5B0%%5D%%5Bcolumn%%5D=1&order%%5B0%%5D%%5Bdir%%5D=desc&start=0&length=1000&search%%5Bvalue%%5D=&_=%d", currentTimestamp)
@@ -147,15 +134,11 @@ func handleNumbers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ------------------------------------------------------------------
-// ہیلپر فنکشنز (Helper Functions)
-// ------------------------------------------------------------------
-
 func fetchRanges() ([]string, []byte, int, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	writer.WriteField("from", StartDate)
-	writer.WriteField("to", EndDate)
+	writer.WriteField("from", getStartDate())
+	writer.WriteField("to", getEndDate())
 	writer.WriteField("_token", CSRFToken)
 	writer.Close()
 
@@ -191,8 +174,8 @@ func fetchRanges() ([]string, []byte, int, error) {
 func fetchNumbers(rangeName string) []string {
 	data := url.Values{}
 	data.Set("_token", CSRFToken)
-	data.Set("start", StartDate)
-	data.Set("end", EndDate)
+	data.Set("start", getStartDate())
+	data.Set("end", getEndDate())
 	data.Set("range", rangeName)
 
 	req, _ := http.NewRequest("POST", "https://www.ivasms.com/portal/sms/received/getsms/number", strings.NewReader(data.Encode()))
@@ -208,7 +191,6 @@ func fetchNumbers(rangeName string) []string {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	
-	// یہاں ڈائنیمک نام کا حل کیا گیا ہے (toggleNum کے بعد کچھ بھی ہو اسے پکڑ لے گا)
 	re := regexp.MustCompile(`toggleNum[a-zA-Z0-9_]+\('([^']+)'`)
 	matches := re.FindAllStringSubmatch(string(bodyBytes), -1)
 
@@ -224,8 +206,8 @@ func fetchNumbers(rangeName string) []string {
 func fetchSMS(rangeName, number string) [][]string {
 	data := url.Values{}
 	data.Set("_token", CSRFToken)
-	data.Set("start", StartDate)
-	data.Set("end", EndDate)
+	data.Set("start", getStartDate())
+	data.Set("end", getEndDate())
 	data.Set("Number", number)
 	data.Set("Range", rangeName)
 
@@ -242,29 +224,25 @@ func fetchSMS(rangeName, number string) [][]string {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	
-	// بھیجنے والا، میسج اور وقت نکالنے کے لیے ریجیکس
 	re := regexp.MustCompile(`(?s)<tr>\s*<td>(.*?)</td>\s*<td><div class="msg-text">(.*?)</div></td>\s*<td class="time-cell">(.*?)</td>`)
 	matches := re.FindAllStringSubmatch(string(bodyBytes), -1)
 	
-	// ایچ ٹی ایم ایل ٹیگز صاف کرنے کے لیے
 	htmlTagRe := regexp.MustCompile(`<[^>]*>`)
 
 	var messages [][]string
 	for _, m := range matches {
 		if len(m) > 3 {
-			// سینڈر کے ٹیگز صاف کرنا
 			sender := htmlTagRe.ReplaceAllString(m[1], "")
 			sender = strings.TrimSpace(sender)
 
-			// میسج صاف کرنا
 			cleanMsg := strings.ReplaceAll(m[2], "&#039;", "'")
 			cleanMsg = strings.ReplaceAll(cleanMsg, "&lt;", "<")
 			cleanMsg = strings.ReplaceAll(cleanMsg, "&gt;", ">")
 			cleanMsg = strings.TrimSpace(cleanMsg)
 
-			// وقت کو آپ کے فارمیٹ (YYYY-MM-DD HH:MM:SS) میں لانا
 			timeStr := strings.TrimSpace(m[3])
-			currentDate := time.Now().Format("2006-01-02")
+			loc, _ := time.LoadLocation("Asia/Karachi")
+			currentDate := time.Now().In(loc).Format("2006-01-02")
 			fullTime := fmt.Sprintf("%s %s", currentDate, timeStr)
 
 			row := []string{sender, number, cleanMsg, fullTime}
