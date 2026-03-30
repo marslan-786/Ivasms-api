@@ -15,14 +15,6 @@ import (
 	"time"
 )
 
-// ایس ایم ایس کے نتائج کے لیے اسٹرکچر
-type SMSResult struct {
-	Range   string `json:"range"`
-	Number  string `json:"number"`
-	Time    string `json:"time"`
-	Message string `json:"message"`
-}
-
 // صاف نمبرز کے نتائج کے لیے اسٹرکچر
 type CleanNumber struct {
 	Network string `json:"network"`
@@ -32,7 +24,6 @@ type CleanNumber struct {
 // ivaSMS سے آنے والے کچے ڈیٹا کا اسٹرکچر
 type IvaNumbersResponse struct {
 	Data []struct {
-		// json.Number اس کو e+11 بننے سے روکے گا اور اصل ویلیو محفوظ رکھے گا
 		Number json.Number `json:"Number"`
 		Range  string      `json:"range"`
 	} `json:"data"`
@@ -50,16 +41,15 @@ func main() {
 // 1. ایس ایم ایس حاصل کرنے والا فنکشن (/api/sms)
 // ------------------------------------------------------------------
 func handleSMS(w http.ResponseWriter, r *http.Request) {
-	// 1. سب سے پہلے رینجز لائیں
 	ranges, rawBody, statusCode, err := fetchRanges()
 	
-	// اگر نیٹ ورک کا ایرر ہو یا پیچھے سرور نے 200 کی بجائے کوئی اور کوڈ (مثلاً 403, 419) دیا ہو
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	
+	// اگر کوئی رینج نہیں ملی یا سرور نے ایرر دیا ہے، تو ہوبہو را ڈیٹا (Raw Data) دکھا دیں
 	if statusCode != 200 || len(ranges) == 0 {
-		// پیچھے سے آنے والا را ڈیٹا (Raw Data) سیدھا کلائنٹ کو بھیج دیں
 		w.WriteHeader(statusCode)
 		w.Write(rawBody)
 		return
@@ -67,9 +57,10 @@ func handleSMS(w http.ResponseWriter, r *http.Request) {
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var allSMS []SMSResult
+	
+	// اس کو make سے انیشلائز کیا ہے تاکہ خالی ہونے کی صورت میں null کی بجائے [] ریٹرن ہو
+	allSMS := make([][]string, 0)
 
-	// ہر رینج کے نمبرز بیک گراؤنڈ میں نکالنے کے لیے
 	for _, rng := range ranges {
 		wg.Add(1)
 		go func(rName string) {
@@ -81,7 +72,6 @@ func handleSMS(w http.ResponseWriter, r *http.Request) {
 				numWg.Add(1)
 				go func(nName string) {
 					defer numWg.Done()
-					// اس نمبر کے سارے ایس ایم ایس نکالیں
 					messages := fetchSMS(rName, nName)
 
 					mu.Lock()
@@ -96,16 +86,14 @@ func handleSMS(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	// وقت کے حساب سے سورٹنگ (نئے میسج سب سے اوپر)
+	// انڈیکس 3 پر ہمارا وقت (Time) محفوظ ہے
 	sort.Slice(allSMS, func(i, j int) bool {
-		return allSMS[i].Time > allSMS[j].Time
+		return allSMS[i][3] > allSMS[j][3]
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "success",
-		"total":  len(allSMS),
-		"data":   allSMS,
-	})
+	// آپ کی ڈیمانڈ کے مطابق بالکل Array of Arrays والا فارمیٹ
+	json.NewEncoder(w).Encode(allSMS)
 }
 
 // ------------------------------------------------------------------
@@ -129,7 +117,6 @@ func handleNumbers(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	bodyBytes, _ := io.ReadAll(resp.Body)
 
-	// اگر پیچھے سے رسپانس 200 نہ ہو، تو را ڈیٹا ریٹرن کر دیں
 	if resp.StatusCode != 200 {
 		w.WriteHeader(resp.StatusCode)
 		w.Write(bodyBytes)
@@ -138,7 +125,6 @@ func handleNumbers(w http.ResponseWriter, r *http.Request) {
 
 	var ivaResp IvaNumbersResponse
 	if err := json.Unmarshal(bodyBytes, &ivaResp); err != nil {
-		// اگر JSON پارس نہ ہو (یعنی کلاؤڈ فلیئر کا ایچ ٹی ایم ایل پیج آ گیا ہو)
 		w.WriteHeader(http.StatusBadGateway)
 		w.Write(bodyBytes)
 		return
@@ -149,7 +135,7 @@ func handleNumbers(w http.ResponseWriter, r *http.Request) {
 	for _, item := range ivaResp.Data {
 		cleanNumbers = append(cleanNumbers, CleanNumber{
 			Network: item.Range,
-			Number:  item.Number.String(), // یہ سائنسی انداز کو ختم کر کے بالکل اصل نمبر دے گا
+			Number:  item.Number.String(),
 		})
 	}
 
@@ -186,7 +172,6 @@ func fetchRanges() ([]string, []byte, int, error) {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 
-	// اگر رسپانس ٹھیک نہ ہو تو سیدھا ڈیٹا واپس بھیجیں
 	if resp.StatusCode != 200 {
 		return nil, bodyBytes, resp.StatusCode, nil
 	}
@@ -223,7 +208,8 @@ func fetchNumbers(rangeName string) []string {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	
-	re := regexp.MustCompile(`toggleNumIsIHj\('([^']+)'`)
+	// یہاں ڈائنیمک نام کا حل کیا گیا ہے (toggleNum کے بعد کچھ بھی ہو اسے پکڑ لے گا)
+	re := regexp.MustCompile(`toggleNum[a-zA-Z0-9_]+\('([^']+)'`)
 	matches := re.FindAllStringSubmatch(string(bodyBytes), -1)
 
 	var numbers []string
@@ -235,7 +221,7 @@ func fetchNumbers(rangeName string) []string {
 	return numbers
 }
 
-func fetchSMS(rangeName, number string) []SMSResult {
+func fetchSMS(rangeName, number string) [][]string {
 	data := url.Values{}
 	data.Set("_token", CSRFToken)
 	data.Set("start", StartDate)
@@ -256,23 +242,33 @@ func fetchSMS(rangeName, number string) []SMSResult {
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	
-	// یہ ریجیکس اب میسج کے ساتھ ساتھ اس کا ٹائم بھی نکالے گا
-	re := regexp.MustCompile(`(?s)<div class="msg-text">(.*?)</div>.*?<td class="time-cell">(.*?)</td>`)
+	// بھیجنے والا، میسج اور وقت نکالنے کے لیے ریجیکس
+	re := regexp.MustCompile(`(?s)<tr>\s*<td>(.*?)</td>\s*<td><div class="msg-text">(.*?)</div></td>\s*<td class="time-cell">(.*?)</td>`)
 	matches := re.FindAllStringSubmatch(string(bodyBytes), -1)
+	
+	// ایچ ٹی ایم ایل ٹیگز صاف کرنے کے لیے
+	htmlTagRe := regexp.MustCompile(`<[^>]*>`)
 
-	var messages []SMSResult
+	var messages [][]string
 	for _, m := range matches {
-		if len(m) > 2 {
-			cleanMsg := strings.ReplaceAll(m[1], "&#039;", "'")
-			cleanMsg = strings.TrimSpace(cleanMsg)
-			timeStr := strings.TrimSpace(m[2])
+		if len(m) > 3 {
+			// سینڈر کے ٹیگز صاف کرنا
+			sender := htmlTagRe.ReplaceAllString(m[1], "")
+			sender = strings.TrimSpace(sender)
 
-			messages = append(messages, SMSResult{
-				Range:   rangeName,
-				Number:  number,
-				Time:    timeStr,
-				Message: cleanMsg,
-			})
+			// میسج صاف کرنا
+			cleanMsg := strings.ReplaceAll(m[2], "&#039;", "'")
+			cleanMsg = strings.ReplaceAll(cleanMsg, "&lt;", "<")
+			cleanMsg = strings.ReplaceAll(cleanMsg, "&gt;", ">")
+			cleanMsg = strings.TrimSpace(cleanMsg)
+
+			// وقت کو آپ کے فارمیٹ (YYYY-MM-DD HH:MM:SS) میں لانا
+			timeStr := strings.TrimSpace(m[3])
+			currentDate := time.Now().Format("2006-01-02")
+			fullTime := fmt.Sprintf("%s %s", currentDate, timeStr)
+
+			row := []string{sender, number, cleanMsg, fullTime}
+			messages = append(messages, row)
 		}
 	}
 	return messages
